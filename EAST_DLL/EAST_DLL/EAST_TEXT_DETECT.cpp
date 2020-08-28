@@ -222,8 +222,8 @@ int EAST_MODEL_DETECT::TextDetect(const char * img_path, float Threshold, vector
 		float confThreshold = 0.5;  //0.6
 		float nmsThreshold = 0.4; //0.2
 
-		int inpWidth = 960;
-		int inpHeight = 960;
+		int inpWidth = 320;  //960
+		int inpHeight =320;
 
 		auto detect_image_path = img_path;
 		Mat srcImg = imread(detect_image_path);
@@ -246,49 +246,88 @@ int EAST_MODEL_DETECT::TextDetect(const char * img_path, float Threshold, vector
 		//检测图像
 		Mat frame, blob;
 		frame = srcImg.clone();
+
+		//增加图像分块并行操作
+		int XCutLength = inpWidth*2;
+		int YCutLength = inpHeight*2;
+		int XCutTolerance = 50;
+		int YCutTolerance = 50;
+		//Output
+		int XRealCutLength = 0;
+		int YRealCutLength = 0;
+		int XNum = 0;
+		int YNum = 0;
+		// Get the cut size of image
+		GetCutWidthAuto(frame, XCutLength, YCutLength, XCutTolerance, YCutTolerance, XRealCutLength, YRealCutLength, XNum, YNum);
+		// Participate Image
+		vector<Mat> ceil_img;
+		vector<Rect> rectPos;
+		ImageParticion( frame, XRealCutLength, YRealCutLength, XNum, YNum, ceil_img, rectPos);
+
+
 		//获取深度学习模型的输入
-		blobFromImage(frame, blob, 1.0, Size(inpWidth, inpHeight), Scalar(123.68, 116.78, 103.94), true, false);
-		net.setInput(blob);
-		//输出结果
-		net.forward(output, outputLayers);
-
-		//置信度
-		Mat scores = output[0];
-		//位置参数
-		Mat geometry = output[1];
-
-		// Decode predicted bounding boxes.
-		std::vector<RotatedRect> boxes;
-		std::vector<float> confidences;
-		_decode_(scores, geometry, confThreshold, boxes, confidences);
-
-		// Apply non-maximum suppression procedure.
-		std::vector<int> indices;
-		NMSBoxes(boxes, confidences, confThreshold, nmsThreshold, indices);
-
-		// Render detections.
-		Point2f ratio((float)frame.cols / inpWidth, (float)frame.rows / inpHeight);
-		for (size_t i = 0; i < indices.size(); ++i)
+		for (int i_img = 0; i_img < ceil_img.size(); i_img++)
 		{
-			RotatedRect& box = boxes[indices[i]];
+			Mat fram_img = ceil_img[i_img];
 
-			Point2f vertices[4];
-			box.points(vertices);
-			for (int j = 0; j < 4; ++j)
+			int nFrameWidth = fram_img.size[1];
+			int nFrameHeight = fram_img.size[0];
+
+			blobFromImage(fram_img, blob, 1.0, Size(inpWidth, inpHeight), Scalar(123.68, 116.78, 103.94), true, false);
+			net.setInput(blob);
+			//输出结果
+			net.forward(output,outputLayers);// outputLayers
+
+			//置信度
+			Mat scores = output[0];
+			//位置参数
+			Mat geometry = output[1];
+
+			// Decode predicted bounding boxes.
+			std::vector<RotatedRect> boxes;
+			std::vector<float> confidences;
+			_decode_(scores, geometry, confThreshold, boxes, confidences);
+
+			// Apply non-maximum suppression procedure.
+			std::vector<int> indices;
+			NMSBoxes(boxes, confidences, confThreshold, nmsThreshold, indices);
+
+			// Render detections.
+			Point2f ratio((float)fram_img.cols / inpWidth, (float)fram_img.rows / inpWidth);
+			for (size_t i = 0; i < indices.size(); ++i)
 			{
-				vertices[j].x *= ratio.x;
-				vertices[j].y *= ratio.y;
+				RotatedRect& box = boxes[indices[i]];
+
+				Point2f vertices[4];
+				box.points(vertices);
+				for (int j = 0; j < 4; ++j)
+				{
+					vertices[j].x *= ratio.x;
+					vertices[j].y *= ratio.y;
+				}
+				vector<double> b;
+				b.clear();
+				b.push_back(rectPos[i_img].x +vertices[0].x);
+				b.push_back(rectPos[i_img].y + vertices[0].y);
+				b.push_back(rectPos[i_img].x+ vertices[2].x);
+				b.push_back(rectPos[i_img].y+ vertices[2].y);
+				TextPos.push_back(b);
 			}
-			vector<double> b;
-			b.clear();
-			b.push_back(vertices[0].x);
-			b.push_back(vertices[0].y);
-			b.push_back(vertices[2].x);
-			b.push_back(vertices[2].y);
-			TextPos.push_back(b);
 		}
+#ifdef DEBUG
+		std::vector< double> layersTimes;
+		double freq = getTickFrequency() / 1000;
+		double t = net.getPerfProfile(layersTimes) / freq;
+		std::string label = format("Inference time: %.2f ms", t);
 
-
+		//Convert
+		size_t origsize = label.length() + 1;
+		const size_t newsize = 100;
+		size_t convertedChars = 0;
+		wchar_t *wcstring = (wchar_t *)malloc(sizeof(wchar_t)*(label.length() - 1));
+		mbstowcs_s(&convertedChars, wcstring, origsize, label.c_str(), _TRUNCATE);
+		AfxMessageBox(wcstring);
+#endif
 
 	}
 	catch (exception e)
@@ -355,4 +394,73 @@ void EAST_MODEL_DETECT::_decode_(const Mat& scores, const Mat& geometry, float s
 			confidences.push_back(score);
 		}
 	}
+}
+/*
+函数功能：自动计算裁切图像的尺寸
+输入参数：图像，欲打算的裁切大小
+		容忍度
+输出参数：
+		实际裁切的大小
+		实际裁切的数目
+*/
+bool EAST_MODEL_DETECT::GetCutWidthAuto(cv::Mat ImageIn, int XCutLength, int YCutLength, int XCutTolerance, int YCutTolerance, int & XRealCutLength, int & YRealCutLength, int & XNum, int & YNum)
+{
+	int nWidth = ImageIn.size[0];
+	int nHeight = ImageIn.size[1];
+
+	if (nWidth <= 0 || nHeight <= 0)
+	{
+		return false;
+	}
+
+	if (nWidth < XCutLength || nHeight < YCutLength)
+	{
+		XRealCutLength = nWidth;
+		YRealCutLength = nHeight;
+		XNum = YNum = 1;
+	}
+	// Row
+	int nXCutNum = nWidth / XCutLength;
+	if (nWidth % XCutLength < XCutTolerance)
+	{
+		XRealCutLength = nWidth * 1.0 / nXCutNum;
+		XNum = nXCutNum;
+	}
+	else
+	{
+		XNum = nXCutNum+1;
+		XRealCutLength = nWidth * 1.0 / XNum;
+	}
+	//Column 
+	int nYCutNum = nHeight / YCutLength;
+	if (nHeight % YCutLength < YCutTolerance)
+	{
+		YRealCutLength = nHeight * 1.0 / nYCutNum;
+		YNum = nYCutNum;
+	}
+	else
+	{
+		YNum = nYCutNum+1;
+		YRealCutLength = nHeight * 1.0 / YNum;
+	}
+	return true;
+}
+
+bool EAST_MODEL_DETECT::ImageParticion(cv::Mat ImageIn, int XCutLength, int YCutLength,int XNum,int YNum,vector<Mat>& ceil_img,vector<Rect>& rectPos)
+{
+	vector<int> name;
+	for (int t = 0; t < XNum * YNum; t++) name.push_back(t);
+	Mat image_cut, roi_img;
+	for (int j = 0; j < XNum; j++)
+	{
+		for (int i = 0; i < YNum; i++)
+		{
+			Rect rect(i * YCutLength, j * XCutLength, YCutLength, XCutLength);
+			rectPos.push_back(rect);
+			image_cut = Mat(ImageIn, rect);
+			roi_img = image_cut.clone();
+			ceil_img.push_back(roi_img);
+		}
+	}
+	return true;
 }
