@@ -25,7 +25,7 @@ public:
 	int LoadModel(const char* model_path);
 
 	//¼ì²âÎÄ±¾ 
-	int TextDetect(const char* img_path, float dThreshold, vector<vector<double>>& TextPos);
+	int TextDetect(cv::Mat srcImg, float dThreshold, vector<vector<double>>& TextPos);
 
 private:
 	std::shared_ptr<EAST_MODEL_DETECT>m_pGCIAlgSynCheck;

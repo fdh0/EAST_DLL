@@ -23,7 +23,7 @@ private:
  class EAST_MODEL_DETECT
  {
  public:
-	 int TextDetect(const char* img_path, float Threshold, vector<vector<double>> &TextPos);
+	 int TextDetect(Mat srcImg, float Threshold, vector<vector<double>> &TextPos);
 	 int LoadModel(const char* model_path);
 	 void _decode_(const Mat& scores, const Mat& geometry, float scoreThresh,
 		 std::vector<RotatedRect>& detections, std::vector<float>& confidences);

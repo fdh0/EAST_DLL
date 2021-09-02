@@ -6,6 +6,9 @@
 #include "opencv2/imgproc/imgproc.hpp"
 #include "EAST_TEXT_DETECT.h"
 
+#include <ppl.h>
+using namespace Concurrency;
+
 using namespace std;
 using namespace cv;
 using namespace cv::dnn;
@@ -214,19 +217,19 @@ bool ADVANCE_EAST_DETECT::descendSort(vector<Point> a, vector<Point> b) {
 	return a.size() > b.size();
 }
 
-int EAST_MODEL_DETECT::TextDetect(const char * img_path, float Threshold, vector<vector<double>>& TextPos)
+int EAST_MODEL_DETECT::TextDetect(Mat srcImg, float Threshold, vector<vector<double>>& TextPos)
 {
 	int nRet = 0;
 	try
 	{
-		float confThreshold = 0.5;  //0.6
-		float nmsThreshold = 0.4; //0.2
+		float confThreshold = 0.5;  //0.6  0.5
+		float nmsThreshold = 0.4; //0.2  0.4
 
 		int inpWidth = 320;  //960
 		int inpHeight =320;
 
-		auto detect_image_path = img_path;
-		Mat srcImg = imread(detect_image_path);
+		//auto detect_image_path = img_path;
+		//Mat srcImg = imread(detect_image_path);
 
 		int or_h = srcImg.rows;
 		int or_w = srcImg.cols;
@@ -237,15 +240,9 @@ int EAST_MODEL_DETECT::TextDetect(const char * img_path, float Threshold, vector
 			return nRet;
 		}
 
-		//输出
-		std::vector<Mat> output;
-		std::vector<String> outputLayers(2);
-		outputLayers[0] = "feature_fusion/Conv_7/Sigmoid";
-		outputLayers[1] = "feature_fusion/concat_3";
-
 		//检测图像
-		Mat frame, blob;
-		frame = srcImg.clone();
+		//Mat frame, blob;
+		//frame = srcImg.clone();
 
 		//增加图像分块并行操作
 		int XCutLength = inpWidth*2;
@@ -257,63 +254,104 @@ int EAST_MODEL_DETECT::TextDetect(const char * img_path, float Threshold, vector
 		int YRealCutLength = 0;
 		int XNum = 0;
 		int YNum = 0;
+
+		//you can add resize if you want to get the bigger Character Text Pos
+		//resize(srcImg, srcImg, Size(640, 640));
+
 		// Get the cut size of image
-		GetCutWidthAuto(frame, XCutLength, YCutLength, XCutTolerance, YCutTolerance, XRealCutLength, YRealCutLength, XNum, YNum);
+		GetCutWidthAuto(srcImg, XCutLength, YCutLength, XCutTolerance, YCutTolerance, XRealCutLength, YRealCutLength, XNum, YNum);
 		// Participate Image
 		vector<Mat> ceil_img;
 		vector<Rect> rectPos;
-		ImageParticion( frame, XRealCutLength, YRealCutLength, XNum, YNum, ceil_img, rectPos);
+		//https://blog.csdn.net/jyjhv/article/details/83588402
+		ImageParticion(srcImg, XRealCutLength, YRealCutLength, XNum, YNum, ceil_img, rectPos);
 
+		// [7/29/2020 fdh] 增加并行处理 
+		int nLabelCount = YNum * XNum;
+		int nProcNum = nLabelCount;;
+		int nCellNum = 1;
+		int nMeanNum = 3;
+		if (nLabelCount > 6)
+		{
+			nCellNum = (nLabelCount + nMeanNum - 1) / nMeanNum;
+			nProcNum = (nLabelCount + nCellNum - 1) / nCellNum;
+		}
 
 		//获取深度学习模型的输入
-		for (int i_img = 0; i_img < ceil_img.size(); i_img++)
+		for (int nCellIndex = 0; nCellIndex < ceil_img.size(); nCellIndex++)
 		{
-			Mat fram_img = ceil_img[i_img];
-
-			int nFrameWidth = fram_img.size[1];
-			int nFrameHeight = fram_img.size[0];
-
-			blobFromImage(fram_img, blob, 1.0, Size(inpWidth, inpHeight), Scalar(123.68, 116.78, 103.94), true, false);
-			net.setInput(blob);
-			//输出结果
-			net.forward(output,outputLayers);// outputLayers
-
-			//置信度
-			Mat scores = output[0];
-			//位置参数
-			Mat geometry = output[1];
-
-			// Decode predicted bounding boxes.
-			std::vector<RotatedRect> boxes;
-			std::vector<float> confidences;
-			_decode_(scores, geometry, confThreshold, boxes, confidences);
-
-			// Apply non-maximum suppression procedure.
-			std::vector<int> indices;
-			NMSBoxes(boxes, confidences, confThreshold, nmsThreshold, indices);
-
-			// Render detections.
-			Point2f ratio((float)fram_img.cols / inpWidth, (float)fram_img.rows / inpWidth);
-			for (size_t i = 0; i < indices.size(); ++i)
-			{
-				RotatedRect& box = boxes[indices[i]];
-
-				Point2f vertices[4];
-				box.points(vertices);
-				for (int j = 0; j < 4; ++j)
+		//parallel_for((UINT)0, (UINT)nProcNum, [&](UINT nProcIndex)//票面并行
+		//{
+			//for (int nInnerIndex = 0; nInnerIndex < nCellNum; nInnerIndex++)
+			//{
+				//int nCellIndex = nProcIndex * nCellNum + nInnerIndex;
+				TRACE("%d", nCellIndex);
+				if (nCellIndex >= nLabelCount)
 				{
-					vertices[j].x *= ratio.x;
-					vertices[j].y *= ratio.y;
+					break;
 				}
-				vector<double> b;
-				b.clear();
-				b.push_back(rectPos[i_img].x +vertices[0].x);
-				b.push_back(rectPos[i_img].y + vertices[0].y);
-				b.push_back(rectPos[i_img].x+ vertices[2].x);
-				b.push_back(rectPos[i_img].y+ vertices[2].y);
-				TextPos.push_back(b);
-			}
-		}
+				Mat blob;
+				std::vector<Mat> output;
+
+				vector<Rect> rectPos1 = rectPos;
+				vector<Mat> ceil_img_ll = ceil_img;
+
+				Mat fram_img = ceil_img_ll[nCellIndex];
+
+				int nFrameWidth = fram_img.size[1];
+				int nFrameHeight = fram_img.size[0];
+
+				blobFromImage(fram_img, blob, 1.0, Size(inpWidth, inpHeight), Scalar(123.68, 116.78, 103.94), true, false);
+				
+				cv::dnn::dnn4_v20200609::Net net_ll = net;
+				//输出
+				std::vector<String> outputLayers(2);
+				outputLayers[0] = "feature_fusion/Conv_7/Sigmoid";
+				outputLayers[1] = "feature_fusion/concat_3";
+
+				net_ll.setInput(blob);
+				//输出结果
+				net_ll.forward(output, outputLayers);// outputLayers
+
+				//置信度
+				Mat scores = output[0];
+				//位置参数
+				Mat geometry = output[1];
+
+				// Decode predicted bounding boxes.
+				std::vector<RotatedRect> boxes;
+				std::vector<float> confidences;
+				_decode_(scores, geometry, confThreshold, boxes, confidences);
+
+				// Apply non-maximum suppression procedure.
+				std::vector<int> indices;
+				NMSBoxes(boxes, confidences, confThreshold, nmsThreshold, indices);
+
+				// Render detections.
+				Point2f ratio((float)fram_img.cols / inpWidth, (float)fram_img.rows / inpWidth);
+				//Point2f ratio((float)or_w / 640, (float)or_h / 640);
+				
+				for (size_t i = 0; i < indices.size(); ++i)
+				{
+					RotatedRect& box = boxes[indices[i]];
+
+					Point2f vertices[4];
+					box.points(vertices);
+					for (int j = 0; j < 4; ++j)
+					{
+						vertices[j].x *= ratio.x;
+						vertices[j].y *= ratio.y;
+					}
+					vector<double> b;
+					b.clear();
+					b.push_back(rectPos1[nCellIndex].x + vertices[0].x);
+					b.push_back(rectPos1[nCellIndex].y + vertices[0].y);
+					b.push_back(rectPos1[nCellIndex].x + vertices[2].x);
+					b.push_back(rectPos1[nCellIndex].y + vertices[2].y);
+					TextPos.push_back(b);
+				}
+			//}
+		}//);
 #ifdef DEBUG
 		std::vector< double> layersTimes;
 		double freq = getTickFrequency() / 1000;
@@ -328,13 +366,11 @@ int EAST_MODEL_DETECT::TextDetect(const char * img_path, float Threshold, vector
 		mbstowcs_s(&convertedChars, wcstring, origsize, label.c_str(), _TRUNCATE);
 		AfxMessageBox(wcstring);
 #endif
-
 	}
 	catch (exception e)
 	{
 		nRet = 1; //针对异常情况
 	}
-
 	return nRet;
 }
 
@@ -421,28 +457,49 @@ bool EAST_MODEL_DETECT::GetCutWidthAuto(cv::Mat ImageIn, int XCutLength, int YCu
 	}
 	// Row
 	int nXCutNum = nWidth / XCutLength;
-	if (nWidth % XCutLength < XCutTolerance)
+
+	//增加约束最大横向分3分
+	if (nXCutNum > 3)
 	{
+		XNum = nXCutNum = 3;
 		XRealCutLength = nWidth * 1.0 / nXCutNum;
-		XNum = nXCutNum;
 	}
 	else
 	{
-		XNum = nXCutNum+1;
-		XRealCutLength = nWidth * 1.0 / XNum;
+		if (nWidth % XCutLength < XCutTolerance)
+		{
+			XRealCutLength = nWidth * 1.0 / nXCutNum;
+			XNum = nXCutNum;
+		}
+		else
+		{
+			XNum = nXCutNum + 1;
+			XRealCutLength = nWidth * 1.0 / XNum;
+		}
 	}
+
 	//Column 
 	int nYCutNum = nHeight / YCutLength;
-	if (nHeight % YCutLength < YCutTolerance)
+	//增加约束最大z向分3分
+	if (nYCutNum > 3)
 	{
+		YNum = nYCutNum=3;
 		YRealCutLength = nHeight * 1.0 / nYCutNum;
-		YNum = nYCutNum;
 	}
 	else
 	{
-		YNum = nYCutNum+1;
-		YRealCutLength = nHeight * 1.0 / YNum;
+		if (nHeight % YCutLength < YCutTolerance)
+		{
+			YRealCutLength = nHeight * 1.0 / nYCutNum;
+			YNum = nYCutNum;
+		}
+		else
+		{
+			YNum = nYCutNum + 1;
+			YRealCutLength = nHeight * 1.0 / YNum;
+		}
 	}
+
 	return true;
 }
 

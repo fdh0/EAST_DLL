@@ -25,12 +25,12 @@ int East_DLL_Export_H::LoadModel(const char* model_path)
 	return nResult;
 }
 
-int East_DLL_Export_H::TextDetect(const char* img_path, float dThreshold, vector<vector<double>>& TextPos)
+int East_DLL_Export_H::TextDetect(cv::Mat srcImg, float dThreshold, vector<vector<double>>& TextPos)
 {
 	int nResult = 0;
 	try
 	{
-		nResult = m_pGCIAlgSynCheck->TextDetect(img_path, dThreshold, TextPos);
+		nResult = m_pGCIAlgSynCheck->TextDetect(srcImg, dThreshold, TextPos);
 	}
 	catch (...)
 	{
